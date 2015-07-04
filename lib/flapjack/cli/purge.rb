@@ -55,6 +55,21 @@ module Flapjack
         end
       end
 
+      def stale_entities
+        if @options[:days]
+          older_than = @options[:days].to_i * 24 * 60 * 60
+          raise "days must be resolveable to an integer" unless @options[:days].to_i.to_s == @options[:days]
+        end
+        entities = Flapjack::Data::Entity.all(redis: redis)
+        stale = entities.select {|e| (e.last_update || 0) < Time.now.to_i - older_than }
+        stale.each {|e| e.delete }
+        if stale.empty?
+          puts "Nothing to do"
+        else
+          puts "Purged #{stale.count} stale entities."
+        end
+      end
+
       private
 
       def redis
@@ -71,13 +86,10 @@ end
 
 desc "Purge data from Flapjack's database"
 command :purge do |purge|
-
   purge.desc 'Purge check history'
   purge.command :check_history do |check_history|
-
     check_history.flag [:d, 'days'], :desc => "purge check history older than DAYS days ago",
       :default_value => 90
-
     check_history.flag [:c, 'check'], :desc => "affect history of only the CHECK"
 
     check_history.action do |global_options,options,args|
@@ -86,4 +98,15 @@ command :purge do |purge|
     end
   end
 
+  purge.desc 'Purge stale entities'
+  purge.command :stale_entities do |stale_entities|
+    stale_entities.flag [:d, 'days'], :desc => "purge check history older than DAYS days ago",
+      :default_value => 90
+    stale_entities.flag [:c, 'check'], :desc => "affect history of only the CHECK"
+
+    stale_entities.action do |global_options, options, args|
+      purge = Flapjack::CLI::Purge.new(global_options, options)
+      purge.stale_entities
+    end
+  end
 end

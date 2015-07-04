@@ -41,3 +41,7 @@ test:
   #flapjack purge stale_checks --days 90
   Scenario: purge all data about checks with no updates in the last 90 days
 
+  #flapjack purge stale_entities --days 90
+  Scenario: purge all data about entities with no updates in the last 90 days
+    When I run `bundle exec bin/flapjack -n test -c tmp/cucumber_cli/purge.yaml purge stale_entities --days 90`
+    Then the exit status should be 0

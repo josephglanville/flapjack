@@ -164,7 +164,7 @@ module Flapjack
 
       def self.delete(entity_name, options = {})
         fail 'Redis connection not set' unless redis = options[:redis]
-
+        entity_id = redis.hget('all_entity_ids_by_name', entity_name)
         check_state_keys = redis.keys("check:#{entity_name}:*")
 
         check_history_keys = redis.keys("#{entity_name}:*:states") +
@@ -201,7 +201,6 @@ module Flapjack
 
         checks.each do |ch|
           existing_check = "#{entity_name}:#{ch}"
-          new_check      = "#{entity_name}:#{ch}"
 
           ch_all_score = redis.zscore('all_checks', existing_check)
           all_checks[ch] = ch_all_score unless ch_all_score.nil?
@@ -270,6 +269,9 @@ module Flapjack
           alerting_to_remove.each_pair do |alerting, chks|
             chks.each { |chk| multi.zrem(alerting, chk) }
           end
+
+          multi.hdel('all_entity_names_by_id', entity_id)
+          multi.hdel('all_entity_ids_by_name', entity_name)
         end
       end
 
@@ -723,8 +725,16 @@ module Flapjack
         end
       end
 
+      def delete
+        Flapjack::Data::Entity.delete(@name, redis: @redis)
+      end
+
       def check_list
         @redis.zrange("current_checks:#{@name}", 0, -1)
+      end
+
+      def last_update
+        check_list.map { |c| @redis.hget("check:#{@name}:#{c}", 'last_update').to_i }.max
       end
 
       def check_count
