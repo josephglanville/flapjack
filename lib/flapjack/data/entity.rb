@@ -162,6 +162,117 @@ module Flapjack
         end
       end
 
+      def self.delete(entity_name, options = {})
+        fail 'Redis connection not set' unless redis = options[:redis]
+
+        check_state_keys = redis.keys("check:#{entity_name}:*")
+
+        check_history_keys = redis.keys("#{entity_name}:*:states") +
+                             redis.keys("#{entity_name}:*:state") +
+                             redis.keys("#{entity_name}:*:sorted_state_timestamps")
+
+        action_keys = redis.keys("#{entity_name}:*:actions")
+
+        maint_keys = redis.keys("#{entity_name}:*:*scheduled_maintenance*")
+
+        all_summary_keys = redis.keys("#{entity_name}:*:summary")
+        maint_summary_keys = redis.keys("#{entity_name}:*:*scheduled_maintenance:summary")
+        check_summary_keys = all_summary_keys - maint_summary_keys
+
+        check_history_keys += check_summary_keys
+
+        notif_keys = redis.keys("#{entity_name}:*:last_*_notification") +
+                     redis.keys("#{entity_name}:*:*_notifications")
+
+        alerting_check_keys = redis.keys('contact_alerting_checks:*')
+
+        all_checks       = {}
+        failed_checks    = {}
+        hashes_to_remove = []
+
+        alerting_to_remove = {}
+
+        sha1 = Digest::SHA1.new
+
+        checks = check_state_keys.collect do |state_key|
+          state_key =~ /^check:#{Regexp.escape(entity_name)}:(.+)$/
+          Regexp.last_match(1)
+        end
+
+        checks.each do |ch|
+          existing_check = "#{entity_name}:#{ch}"
+          new_check      = "#{entity_name}:#{ch}"
+
+          ch_all_score = redis.zscore('all_checks', existing_check)
+          all_checks[ch] = ch_all_score unless ch_all_score.nil?
+
+          ch_fail_score = redis.zscore('failed_checks', existing_check)
+          failed_checks[ch] = ch_fail_score unless ch_fail_score.nil?
+
+          hashes_to_remove << Digest.hexencode(sha1.digest(existing_check))[0..7].downcase
+
+          alerting_check_keys.each do |ack|
+            ack_score = redis.zscore(ack, existing_check)
+            unless ack_score.nil?
+              alerting_to_remove[ack] ||= []
+              alerting_to_remove[ack] << existing_check
+
+            end
+          end
+        end
+
+        current_score = redis.zscore('current_entities', entity_name)
+
+        block_keys = redis.keys("drop_alerts_for_contact:*:*:#{entity_name}:*:*")
+
+        del_all_checks = redis.exists("all_checks:#{entity_name}")
+        del_current_checks = redis.exists("current_checks:#{entity_name}")
+
+        redis.multi do |multi|
+          yield(multi) if block_given? # entity id -> name update from add()
+
+          check_state_keys.each do |csk|
+            multi.del(csk, csk.sub(/^check:#{Regexp.escape(entity_name)}:/, "check:#{entity_name}:"))
+          end
+
+          (check_history_keys + action_keys + maint_keys + notif_keys).each do |chk|
+            multi.del(chk, chk.sub(/^#{Regexp.escape(entity_name)}:/, "#{entity_name}:"))
+          end
+
+          all_checks.each_pair do |ch, score|
+            multi.zrem('all_checks', "#{entity_name}:#{ch}")
+          end
+
+          # currently failing checks
+          failed_checks.each_pair do |ch, score|
+            multi.zrem('failed_checks', "#{entity_name}:#{ch}")
+          end
+
+          if del_all_checks
+            multi.del("all_checks:#{entity_name}")
+          end
+
+          if del_current_checks
+            multi.del("current_checks:#{entity_name}")
+          end
+
+          unless current_score.nil?
+            multi.zrem('current_entities', entity_name)
+          end
+
+          block_keys.each do |blk|
+            multi.del(blk, blk.sub(/^drop_alerts_for_contact:(.+):([^:]+):#{Regexp.escape(entity_name)}:(.+):([^:]+)$/,
+                                      "drop_alerts_for_contact:\\1:\\2:#{entity_name}:\\3:\\4"))
+          end
+
+          hashes_to_remove.each { |hash| multi.hdel('checks_by_hash', hash) }
+
+          alerting_to_remove.each_pair do |alerting, chks|
+            chks.each { |chk| multi.zrem(alerting, chk) }
+          end
+        end
+      end
+
       # NB only used by the 'entities:reparent' Rake task, but kept in this
       # class to be more easily testable
       def self.merge(old_name, current_name, options = {})
